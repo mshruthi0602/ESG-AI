@@ -1,0 +1,204 @@
+# sanity_check.py
+from __future__ import annotations
+import os, sys, shutil, argparse, subprocess, random
+from pprint import pprint
+
+random.seed(42)  # keep mock-news stable if used
+
+def line(title=""):
+    print("\n" + "=" * 80)
+    if title:
+        print(title)
+        print("-" * 80)
+
+def _run(cmd: list[str]) -> int:
+    print("[cmd]", " ".join(cmd))
+    return subprocess.run(cmd, check=True).returncode
+
+def _artifact_path(kind: str) -> str:
+    return os.path.join("models", f"predictor_{kind}.pkl")
+
+def _copy_active_to(kind: str) -> str:
+    src = os.path.join("models", "predictor.pkl")
+    dst = _artifact_path(kind)
+    if not os.path.exists(src):
+        raise FileNotFoundError("models/predictor.pkl not found after training.")
+    shutil.copy(src, dst)
+    print(f"[save] {dst}")
+    return dst
+
+def _load_auc(path: str) -> float | None:
+    try:
+        import joblib
+        blob = joblib.load(path)
+        return blob.get("va_auc")
+    except Exception as e:
+        print(f"[warn] could not read AUC from {path}: {e}")
+        return None
+
+def train_one(kind: str, period: str, shap_path: str | None) -> tuple[str, float | None]:
+    """
+    Call the CLI trainer: python -m src.model_trainer --kind KIND --period PERIOD [--shap out.png]
+    Then copy models/predictor.pkl -> models/predictor_KIND.pkl and return its AUC.
+    """
+    cmd = [sys.executable, "-m", "src.model_trainer", "--kind", kind, "--period", period]
+    if shap_path:
+        # ensure folder exists
+        os.makedirs(os.path.dirname(shap_path), exist_ok=True)
+        cmd += ["--shap", shap_path]
+    print(f"\n[train] kind={kind} period={period} shap={shap_path or '-'}")
+    _run(cmd)
+    dst = _copy_active_to(kind)
+    auc = _load_auc(dst)
+    print(f"[AUC] {kind}: {auc}")
+    return dst, auc
+
+def compare_models_on_features(tickers: int, period: str, interval: str) -> None:
+    from src.price_data import get_price_history, list_cached_tickers
+    from src.data_loader import load_esg_data
+    from src.news_fetcher import get_headlines_for_universe, build_sentiment_map
+    from src.features import make_panel_features
+    from src import model_infer
+
+    # build one feature frame
+    ticks = list_cached_tickers()[:tickers]
+    if not ticks:
+        ticks = load_esg_data()["Ticker"].astype(str).str.upper().tolist()[:tickers]
+
+    P = get_price_history(ticks, period=period, interval=interval)
+    S = build_sentiment_map(get_headlines_for_universe(ticks))
+    X, y = make_panel_features(P, load_esg_data(), S)
+    rows = 0 if X is None else len(X)
+    print(f"[features] rows={rows} has_y={y is not None}")
+    if not rows:
+        return
+
+    # cycle through all saved models
+    model_files = [
+        ("logreg", _artifact_path("logreg")),
+        ("rf",     _artifact_path("rf")),
+        ("xgb",    _artifact_path("xgb")),
+        ("lgbm",   _artifact_path("lgbm")),
+    ]
+    active = os.path.join("models", "predictor.pkl")
+    backup = None
+    if os.path.exists(active):
+        backup = active + ".bak"
+        shutil.copy(active, backup)
+
+    try:
+        for name, path in model_files:
+            if not os.path.exists(path):
+                continue
+            shutil.copy(path, active)  # activate this model
+            probs = model_infer.predict_proba(X)
+            top = sorted(probs.items(), key=lambda kv: kv[1], reverse=True)[:5]
+            print(f"\n{name.upper()} top-5:")
+            for t, p in top:
+                print(f"  {t:6s}  {p:0.3f}")
+    finally:
+        if backup and os.path.exists(backup):
+            shutil.copy(backup, active)
+            os.remove(backup)
+
+def main():
+    ap = argparse.ArgumentParser(description="Train + sanity-check ESG-AI NOW in one shot")
+    ap.add_argument("--train-all", action="store_true", help="Train logreg, rf, xgb sequentially")
+    ap.add_argument("--period", default="3y")
+    ap.add_argument("--interval", default="1d")
+    ap.add_argument("--tickers", type=int, default=50)
+    ap.add_argument("--compare-models", action="store_true", help="Compare predictions per saved model")
+    ap.add_argument("--activate-best", action="store_true", help="Copy best AUC to models/predictor.pkl")
+    ap.add_argument("--skip-xgb", action="store_true", help="Skip XGBoost training")
+    ap.add_argument("--run-app", choices=["python", "streamlit", "none"], default="none",
+                    help="Launch app after checks (default: none)")
+    args = ap.parse_args()
+
+    # 1) Universe & Prices
+    from src.price_data import get_price_history, list_cached_tickers
+    from src.data_loader import load_esg_data
+    line("1) Universe & Prices")
+    ticks = list_cached_tickers()[:args.tickers]
+    if not ticks:
+        ticks = load_esg_data()["Ticker"].astype(str).str.upper().tolist()[:args.tickers]
+    print(f"Using tickers ({len(ticks)}): {ticks[:10]}{' ...' if len(ticks)>10 else ''}")
+    P = get_price_history(ticks, period=args.period, interval=args.interval)
+    shapes = {t: P[t].shape for t in ticks[:10]}
+    print("Price shapes (first 10):")
+    pprint(shapes)
+
+    # 2) Features (price + ESG + sentiment)
+    from src.news_fetcher import get_headlines_for_universe, build_sentiment_map
+    from src.features import make_panel_features
+    line("2) Features (price + ESG + sentiment)")
+    sent_map = build_sentiment_map(get_headlines_for_universe(ticks))
+    X, y = make_panel_features(P, load_esg_data(), sent_map)
+    rows = 0 if X is None else len(X)
+    print(f"Feature rows: {rows} | has_y: {y is not None}")
+    if rows:
+        print("SentimentNum counts:", X["SentimentNum"].value_counts(dropna=False).to_dict())
+        print("Sample rows:\n", X.head(5).to_string(index=False))
+
+    # 3) FinBERT quick probe
+    from src.finbert_sentiment import label_text, get_sentiment
+    line("3) FinBERT quick probe")
+    samples = ["Beats earnings and raises guidance",
+               "Sued for fraud; shares plunge",
+               "Launches partnership; impact unclear"]
+    print("Labels:", [label_text(s) for s in samples])
+    print("With scores:", [get_sentiment(s) for s in samples[:2]])
+
+    # 4) Train models 
+    aucs: list[tuple[str, float | None]] = []
+    if args.train_all:
+        line("4) Train models")
+        # LogReg
+        dst, auc = train_one("logreg", args.period, None)
+        aucs.append(("logreg", auc))
+        # Random Forest
+        dst, auc = train_one("rf", args.period, "outputs/shap_rf.png")
+        aucs.append(("rf", auc))
+        # XGBoost 
+        if not args.skip_xgb:
+            try:
+                dst, auc = train_one("xgb", args.period, "outputs/shap_xgb.png")
+                aucs.append(("xgb", auc))
+            except subprocess.CalledProcessError as e:
+                print("[warn] XGBoost training failed or xgboost not installed; skipping.")
+
+    # 5) Show artifact AUCs and optionally activate the best
+    import glob
+    line("5) Model artifacts")
+    found = []
+    for kind in ("logreg", "rf", "xgb", "lgbm"):
+        path = _artifact_path(kind)
+        if os.path.exists(path):
+            auc = _load_auc(path)
+            found.append((kind, auc))
+            print(f"{kind:6s} | AUC={auc}")
+        else:
+            print(f"{kind:6s} | (not found: {path})")
+
+    if args.activate_best and found:
+        best = max([f for f in found if isinstance(f[1], (int, float))], key=lambda t: t[1], default=None)
+        if best:
+            shutil.copy(_artifact_path(best[0]), os.path.join("models", "predictor.pkl"))
+            print(f"[activate] best={best[0]}  AUC={best[1]}  → models/predictor.pkl")
+
+    # 6) Compare predictions per model (optional)
+    if args.compare_models:
+        line("6) Compare predictions across models")
+        compare_models_on_features(args.tickers, args.period, args.interval)
+
+    # 7) Optionally run the app
+    if args.run_app != "none":
+        line("7) Launch app")
+        if args.run_app == "python":
+            _run([sys.executable, "app.py"])
+        elif args.run_app == "streamlit":
+            _run(["streamlit", "run", "app.py"])
+
+    line("Done")
+
+if __name__ == "__main__":
+    main()
