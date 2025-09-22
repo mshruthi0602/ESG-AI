@@ -1,3 +1,10 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:7e9cf9039708f940e8d2a64edd706db011dc0d78998cfa3f4937f5beff6762e9
-size 680
+from src.explanation_generator import generate_explanations
+
+sample = [
+    {"Ticker": "NVDA", "ESG_Score": 28, "ESG_Category": "High", "Risk_Category": "Medium", "Sentiment": "positive", "News": "AI chip demand grows", "NewsURL": "https://example.com"},
+    {"Ticker": "TXN", "ESG_Score": 22, "ESG_Category": "Medium", "Risk_Category": "Medium", "Sentiment": "neutral", "News": "Steady performance", "NewsURL": "https://example.com"},
+    {"Ticker": "INTC", "ESG_Score": 15, "ESG_Category": "Low", "Risk_Category": "High", "Sentiment": "negative", "News": "Cost cutting news", "NewsURL": "https://example.com"}
+]
+
+for line in generate_explanations(sample):
+    print(line, "\n")
