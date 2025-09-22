@@ -1,3 +1,20 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:26df3f1f21e128dbd2b95c08a349713bcd08dd5f2070852eb65ccd374228e814
-size 153
+pandas
+numpy
+yfinance
+transformers
+torch
+stable-baselines3
+beautifulsoup4
+scikit-learn
+requests
+openai
+python-dotenv
+scipy
+joblib
+flask
+openai
+mplfinance
+scikit-learn>=1.2
+xgboost>=1.7      
+lightgbm>=3.3     
+shap>=0.44       
