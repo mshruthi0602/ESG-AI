@@ -1,3 +1,14 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:18bcd26cd924a9ac3e89fdef307f5de5f57f23f058877db6738ef0b5be684f8a
-size 482
+# src/runlog.py
+import os, json, datetime
+from typing import Any
+
+def begin_run(tag: str = "web") -> str:
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = os.path.join("outputs", f"run_{ts}_{tag}")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+def save_json(obj: Any, path: str, name: str):
+    os.makedirs(path, exist_ok=True)
+    with open(os.path.join(path, name), "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
